@@ -1,0 +1,12 @@
+{
+  "name": "qa-agent-mock-api",
+  "version": "1.0.0",
+  "description": "Mock health API with a seeded calculation bug, used to demo the QA-Agent AI validation workflow.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

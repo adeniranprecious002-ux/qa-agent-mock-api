@@ -1,0 +1,240 @@
+{
+  "name": "QA-Agent - AI Regression & Calculation Guard",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "trigger-schedule-001",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Define which users/endpoints this run should check.\n// One clean user, one intentionally buggy user, so the pipeline\n// has both a PASS case and a real anomaly to catch each run.\nreturn [\n  { json: { userId: 'user-001' } },\n  { json: { userId: 'user-002' } },\n  { json: { userId: 'buggy-user' } }\n];"
+      },
+      "id": "code-define-users-002",
+      "name": "Define Users To Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.QA_API_BASE_URL }}/api/vitals/{{ $json.userId }}/stress",
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "http-fetch-stress-003",
+      "name": "Fetch Stress Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Recompute the expected stress score independently of the API\n// (RMSSD-based HRV calc) and compare against what the API returned.\n// This is the actual \"calculation validation\" step.\n\nconst body = $input.item.json;\nconst rr = body.rr_intervals;\n\nconst diffs = [];\nfor (let i = 0; i < rr.length - 1; i++) diffs.push(rr[i + 1] - rr[i]);\nconst meanSquare = diffs.reduce((s, d) => s + d * d, 0) / diffs.length;\nconst rmssd = Math.sqrt(meanSquare);\nconst expected = Math.round(Math.max(0, Math.min(100, 100 - rmssd * 2)) * 10) / 10;\n\nconst actual = body.stress_score;\nconst delta = Math.round(Math.abs(expected - actual) * 10) / 10;\nconst TOLERANCE = 3.0;\n\nlet severity = 'none';\nif (delta > TOLERANCE * 3) severity = 'high';\nelse if (delta > TOLERANCE) severity = 'medium';\n\nreturn [{\n  json: {\n    userId: body.userId,\n    checked_at: body.timestamp,\n    endpoint: `/api/vitals/${body.userId}/stress`,\n    rr_intervals: rr,\n    expected_value: expected,\n    actual_value: actual,\n    delta,\n    severity,\n    pass: severity === 'none'\n  }\n}];"
+      },
+      "id": "code-validate-calc-004",
+      "name": "Validate Calculation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-severity",
+              "leftValue": "={{ $json.severity }}",
+              "rightValue": "none",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-anomaly-005",
+      "name": "Anomaly Detected?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "url": "https://api.anthropic.com/v1/messages",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "content-type", "value": "application/json" },
+            { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"claude-sonnet-4-6\",\n  max_tokens: 300,\n  messages: [{\n    role: \"user\",\n    content: `You are a QA engineer reviewing a failed calculation check.\\n\\nEndpoint: ${$json.endpoint}\\nExpected stress score: ${$json.expected_value}\\nActual API value: ${$json.actual_value}\\nDelta: ${$json.delta}\\nSeverity: ${$json.severity}\\nRR intervals: ${JSON.stringify($json.rr_intervals)}\\n\\nIn 2-3 sentences, identify the most likely root cause (e.g. rounding, stale cache, formula drift, bad input data) and suggest one specific follow-up test to confirm it. Respond ONLY with JSON: {\\\"likely_cause\\\": \\\"\\\", \\\"suggested_test\\\": \\\"\\\", \\\"confidence\\\": \\\"\\\"}`\n  }]\n}) }}"
+      },
+      "id": "http-llm-explain-006",
+      "name": "Ask LLM To Explain",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, -120],
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract the JSON the model returned and merge it with the\n// original validation data so both flow downstream together.\nconst llmText = $input.item.json.content?.[0]?.text || '{}';\nlet parsed;\ntry {\n  const cleaned = llmText.replace(/```json|```/g, '').trim();\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  parsed = { likely_cause: 'unparseable LLM response', suggested_test: '', confidence: 'low' };\n}\n\nconst upstream = $('Validate Calculation').item.json;\n\nreturn [{\n  json: {\n    ...upstream,\n    ai_explanation: parsed\n  }\n}];"
+      },
+      "id": "code-parse-llm-007",
+      "name": "Parse LLM Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, -120]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  chat_id: $env.TELEGRAM_CHAT_ID,\n  text: `⚠️ QA-Agent anomaly (${$json.severity})\\nEndpoint: ${$json.endpoint}\\nExpected: ${$json.expected_value} | Actual: ${$json.actual_value} | Delta: ${$json.delta}\\nLikely cause: ${$json.ai_explanation.likely_cause}\\nSuggested test: ${$json.ai_explanation.suggested_test}`\n}) }}"
+      },
+      "id": "http-telegram-alert-008",
+      "name": "Send Telegram Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, -120]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/qa_checks",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "resolution=ignore-duplicates" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  endpoint: $json.endpoint,\n  status: 'anomaly',\n  expected_value: $json.expected_value,\n  actual_value: $json.actual_value,\n  delta: $json.delta,\n  severity: $json.severity,\n  ai_explanation: $json.ai_explanation,\n  raw_response: { userId: $json.userId, rr_intervals: $json.rr_intervals }\n}) }}"
+      },
+      "id": "http-supabase-log-anomaly-009",
+      "name": "Log Anomaly To Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1760, -120]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/qa_checks",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Prefer", "value": "resolution=ignore-duplicates" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  endpoint: $json.endpoint,\n  status: 'pass',\n  expected_value: $json.expected_value,\n  actual_value: $json.actual_value,\n  delta: $json.delta,\n  severity: $json.severity,\n  raw_response: { userId: $json.userId }\n}) }}"
+      },
+      "id": "http-supabase-log-pass-010",
+      "name": "Log Pass To Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 120]
+    },
+    {
+      "parameters": {},
+      "id": "error-trigger-011",
+      "name": "On Workflow Error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [0, 320]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  chat_id: $env.TELEGRAM_CHAT_ID,\n  text: `🔴 QA-Agent workflow FAILED: ${$json.execution?.error?.message || 'unknown error'}`\n}) }}"
+      },
+      "id": "http-telegram-error-012",
+      "name": "Alert On Pipeline Failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 320]
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": {
+      "main": [[{ "node": "Define Users To Check", "type": "main", "index": 0 }]]
+    },
+    "Define Users To Check": {
+      "main": [[{ "node": "Fetch Stress Data", "type": "main", "index": 0 }]]
+    },
+    "Fetch Stress Data": {
+      "main": [[{ "node": "Validate Calculation", "type": "main", "index": 0 }]]
+    },
+    "Validate Calculation": {
+      "main": [[{ "node": "Anomaly Detected?", "type": "main", "index": 0 }]]
+    },
+    "Anomaly Detected?": {
+      "main": [
+        [{ "node": "Ask LLM To Explain", "type": "main", "index": 0 }],
+        [{ "node": "Log Pass To Supabase", "type": "main", "index": 0 }]
+      ]
+    },
+    "Ask LLM To Explain": {
+      "main": [[{ "node": "Parse LLM Response", "type": "main", "index": 0 }]]
+    },
+    "Parse LLM Response": {
+      "main": [[{ "node": "Send Telegram Alert", "type": "main", "index": 0 }]]
+    },
+    "Send Telegram Alert": {
+      "main": [[{ "node": "Log Anomaly To Supabase", "type": "main", "index": 0 }]]
+    },
+    "On Workflow Error": {
+      "main": [[{ "node": "Alert On Pipeline Failure", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": ""
+  },
+  "pinData": {}
+}
