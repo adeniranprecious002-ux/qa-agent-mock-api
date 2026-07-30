@@ -1,4 +1,4 @@
 [build]
-  base = "dashboard"
-  publish = "."
+  base = "qa-agent"
+  publish = "dashboard"
   command = ""
