@@ -69,8 +69,18 @@
     color: #f0c674;
     padding: 12px 16px;
     border-radius: 6px;
-    margin-bottom: 20px;
+    margin-bottom: 12px;
     font-size: 13px;
+  }
+  .status-pill {
+    display: inline-block;
+    margin-bottom: 20px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    background: rgba(63, 185, 80, 0.15);
+    color: var(--pass);
+    border: 1px solid rgba(63, 185, 80, 0.25);
   }
 </style>
 </head>
@@ -79,9 +89,8 @@
 <h1>QA-Agent — Live Check Results</h1>
 <p class="sub">Reads directly from the qa_checks table in Supabase.</p>
 
-<div id="config-warning" class="config-warning" style="display:none;">
-  Set SUPABASE_URL and SUPABASE_ANON_KEY at the top of the script before this will load data.
-</div>
+<div id="config-warning" class="config-warning" style="display:none;"></div>
+<div id="status-pill" class="status-pill">Loading latest QA results…</div>
 
 <div class="stats">
   <div class="stat-card"><div class="num" id="stat-total">–</div><div class="label">Checks (24h)</div></div>
@@ -100,43 +109,105 @@
 
 <script>
   // ---- Configure these two values ----
-  const SUPABASE_URL = "https://YOUR-PROJECT.supabase.co";
-  const SUPABASE_ANON_KEY = "YOUR_ANON_KEY";
+  const SUPABASE_URL = "https://waobhwldoxaoceldhmig.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Indhb2Jod2xkb3hhb2NlbGRobWlnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQyNjU3NjgsImV4cCI6MjA4OTg0MTc2OH0._s8eaVFgOWOWOWHFpLLyvMdtfQFt7o_ubYbNYmDCaQY";
   // -------------------------------------
 
-  async function loadChecks() {
-    if (SUPABASE_URL.includes("YOUR-PROJECT")) {
-      document.getElementById("config-warning").style.display = "block";
-      return;
+  const SAMPLE_ROWS = [
+    {
+      checked_at: new Date().toISOString(),
+      endpoint: "/api/vitals/user-001/stress",
+      status: "pass",
+      severity: "none",
+      expected_value: 41.7,
+      actual_value: 41.7,
+      delta: 0,
+      ai_explanation: { likely_cause: "Sample data loaded locally." }
+    },
+    {
+      checked_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      endpoint: "/api/vitals/buggy-user/stress",
+      status: "anomaly",
+      severity: "high",
+      expected_value: 36.8,
+      actual_value: 48.4,
+      delta: 11.6,
+      ai_explanation: { likely_cause: "Likely formula drift or stale cached value." }
     }
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/qa_checks_recent`, {
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+  ];
+
+  function showMessage(message, isWarning = false) {
+    const warning = document.getElementById("config-warning");
+    const pill = document.getElementById("status-pill");
+    warning.textContent = message;
+    warning.style.display = message ? "block" : "none";
+    warning.style.borderColor = isWarning ? "#f85149" : "#3fb950";
+    warning.style.background = isWarning ? "#3d0f0f" : "#123121";
+    warning.style.color = isWarning ? "#ffb3b3" : "#a8f0b7";
+    pill.textContent = isWarning ? "Showing fallback sample data" : "Live data loaded";
+  }
+
+  function formatValue(value) {
+    if (value === null || value === undefined || value === "") return "–";
+    if (typeof value === "number") return Number.isFinite(value) ? value.toFixed(1) : String(value);
+    return String(value);
+  }
+
+  async function loadChecks() {
+    try {
+      if (window.location.protocol === "file:") {
+        throw new Error("Open this page through a local web server such as http://localhost:8000 so the browser can access Supabase.");
       }
-    });
-    const rows = await res.json();
-    render(rows);
+
+      if (SUPABASE_URL.includes("YOUR-PROJECT")) {
+        throw new Error("Set SUPABASE_URL and SUPABASE_ANON_KEY at the top of the script before this will load data.");
+      }
+
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/qa_checks_recent?select=endpoint,checked_at,status,expected_value,actual_value,delta,severity,ai_explanation`, {
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+        }
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(`Supabase request failed (${res.status}): ${errorText}`);
+      }
+
+      const rows = await res.json();
+      if (!Array.isArray(rows)) {
+        throw new Error("Unexpected response format from Supabase.");
+      }
+
+      render(rows);
+      showMessage("");
+    } catch (error) {
+      console.error("QA dashboard load failed", error);
+      render(SAMPLE_ROWS);
+      showMessage(error.message, true);
+    }
   }
 
   function render(rows) {
-    const total = rows.length;
-    const passCount = rows.filter(r => r.status === "pass").length;
-    const anomalyCount = rows.filter(r => r.status === "anomaly").length;
+    const safeRows = Array.isArray(rows) ? rows : [];
+    const total = safeRows.length;
+    const passCount = safeRows.filter(r => r.status === "pass").length;
+    const anomalyCount = safeRows.filter(r => r.status === "anomaly").length;
 
     document.getElementById("stat-total").textContent = total;
     document.getElementById("stat-pass").textContent = total ? `${Math.round((passCount / total) * 100)}%` : "–";
     document.getElementById("stat-anomalies").textContent = anomalyCount;
 
     const tbody = document.getElementById("rows");
-    tbody.innerHTML = rows.map(r => `
+    tbody.innerHTML = safeRows.map(r => `
       <tr>
-        <td>${new Date(r.checked_at).toLocaleString()}</td>
-        <td>${r.endpoint}</td>
-        <td><span class="badge ${r.severity === 'none' ? 'pass' : r.severity}">${r.status}</span></td>
-        <td>${r.expected_value ?? "–"}</td>
-        <td>${r.actual_value ?? "–"}</td>
-        <td>${r.delta ?? "–"}</td>
+        <td>${r.checked_at ? new Date(r.checked_at).toLocaleString() : "–"}</td>
+        <td>${r.endpoint ?? "–"}</td>
+        <td><span class="badge ${r.severity === 'none' ? 'pass' : r.severity}">${r.status ?? "unknown"}</span></td>
+        <td>${formatValue(r.expected_value)}</td>
+        <td>${formatValue(r.actual_value)}</td>
+        <td>${formatValue(r.delta)}</td>
         <td>${r.ai_explanation?.likely_cause ?? "–"}</td>
       </tr>
     `).join("");
