@@ -101,18 +101,17 @@
 <table>
   <thead>
     <tr>
-      <th>Time</th><th>Endpoint</th><th>Status</th><th>Expected</th><th>Actual</th><th>Delta</th><th>Likely Cause</th>
+      <th>Time</th><th>Endpoint</th><th>Status</th><th>Severity</th><th></th>Expected</th><th>Actual</th><th>Delta</th><th>Likely Cause</th>
     </tr>
   </thead>
   <tbody id="rows"></tbody>
 </table>
 
 <script>
-  // ---- Configure these two values ----
+  
   const SUPABASE_URL = "https://waobhwldoxaoceldhmig.supabase.co";
   const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Indhb2Jod2xkb3hhb2NlbGRobWlnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQyNjU3NjgsImV4cCI6MjA4OTg0MTc2OH0._s8eaVFgOWOWOWHFpLLyvMdtfQFt7o_ubYbNYmDCaQY";
-  // -------------------------------------
-
+ 
   const SAMPLE_ROWS = [
     {
       checked_at: new Date().toISOString(),
@@ -205,6 +204,7 @@
         <td>${r.checked_at ? new Date(r.checked_at).toLocaleString() : "–"}</td>
         <td>${r.endpoint ?? "–"}</td>
         <td><span class="badge ${r.severity === 'none' ? 'pass' : r.severity}">${r.status ?? "unknown"}</span></td>
+        <td><span class="badge ${r.severity === 'none' ? 'pass' : r.severity}">${r.severity ?? "none"}</span></td>
         <td>${formatValue(r.expected_value)}</td>
         <td>${formatValue(r.actual_value)}</td>
         <td>${formatValue(r.delta)}</td>
